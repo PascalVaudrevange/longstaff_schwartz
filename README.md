@@ -10,7 +10,8 @@ ptangle "longstaff_schwartz.pnw"
 
 In order to create the pdf document, run from within python
 
-import pweave pweave.weave(r'longstaff_schwartz.pnw', figformat='png', doctype='texmint
+import pweave 
+pweave.weave(r'longstaff_schwartz.pnw', figformat='png', doctype='texminted', cache=True)
 
 followed by running LaTeX
 
