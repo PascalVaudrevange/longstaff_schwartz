@@ -8,7 +8,7 @@ In order to extract the code, run ptangle from the command line.
 
 ptangle "longstaff_schwartz.pnw"
 
-In order to recreate the document, run from within python
+In order to create the pdf document, run from within python
 
 import pweave pweave.weave(r'longstaff_schwartz.pnw', figformat='png', doctype='texmint
 
