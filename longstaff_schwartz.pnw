@@ -717,7 +717,7 @@ Note that all runs have a fixed seed for reproducibility. Modify if needed.
 This document uses literate programming \cite{pweave}. The code can be extracted using
 \begin{code}
 \begin{minted}{bash}
-ptangle "M15 1000246 Section 1.pnw"
+ptangle "M15 XXXXXX Section 1.pnw"
 \end{minted}
 \caption{Extracting the code from the noweb document.}
 \label{code:extraction}
@@ -726,14 +726,14 @@ Creating this document from source (including dynamic creation of figures) is do
 \begin{code}
 \begin{minted}{python}
 import pweave
-pweave.weave(r'M6_15_1000246_Section_1.pnw'
+pweave.weave(r'M6_15_XXXXXX_Section_1.pnw'
             , figformat='png'
             , doctype='texminted'
             , cache=True)
 \end{minted}
 followed by the shell command
 \begin{minted}{bash}
-pdflatex -shell-escape "M6_15_1000246_Section_1.tex"
+pdflatex -shell-escape "M6_15_XXXXXX_Section_1.tex"
 \end{minted}
 \caption{Recreating this document.}
 \label{code:recreate}
