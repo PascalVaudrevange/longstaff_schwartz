@@ -6,13 +6,14 @@ This is a document written using literate programming, pweave (http://mpastell.c
 
 In order to extract the code, run ptangle from the command line.
 
-ptangle "longstaff_schwartz.pnw"
+  ptangle "longstaff_schwartz.pnw"
 
 In order to create the pdf document, run from within python
 
-import pweave 
-pweave.weave(r'longstaff_schwartz.pnw', figformat='png', doctype='texminted', cache=True)
+  import pweave 
+
+  pweave.weave(r'longstaff_schwartz.pnw', figformat='png', doctype='texminted', cache=True)
 
 followed by running LaTeX
 
-pdflatex longstaff_schwartz.tex
+  pdflatex longstaff_schwartz.tex
