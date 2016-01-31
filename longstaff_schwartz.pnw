@@ -1,0 +1,757 @@
+\documentclass{article}
+\usepackage[linesnumbered]{algorithm2e}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{color}
+\usepackage{graphicx}
+\usepackage{minted}
+\usepackage{rotating}
+\usepackage{setspace}
+
+\bibliographystyle{unsrt}
+
+\newenvironment{code}{\captionsetup{type=listing}}{}
+\fvset{linenos=True, frame=single}
+
+\author{Pascal Vaudrevange}
+\title{Longstaff-Schwartz for an American put option including Roger's upper bound}
+
+\begin{document}
+\maketitle
+\section*{Section 1}
+This document is typeset using literate programming. Please see the appendix for instructions how to recreate this document.
+\section*{Section 1.1}
+\begin{code}
+\begin{minted}{matlab}
+
+%
+% modelling constants
+%
+
+close all;
+clear all;
+
+r    = 0.05;
+sig  = 0.2;
+T    = 1;
+X    = 1;
+Smax = 2;
+
+%
+% grid
+%
+
+J = 201;
+N = 4001;
+
+% J = 401;     % uncomment to run with twice as many grid points and
+% N = 16001;   % four times as many timesteps, for numerical stability
+
+S  = linspace(0,Smax,J)';
+dS = S(2)-S(1);
+t  = linspace(0,T,N);
+dt = t(2)-t(1);
+
+j  = 1:J-1;
+jm = max(j-1,1);
+jp = j+1;
+
+V0 = max(X-S,0);
+V  = V0*ones(1,N);
+Sb = zeros(1,N);
+
+%
+% time-marching
+%
+
+Sb(N) = 1;
+
+for n = N:-1:2
+  V(j,n-1) = (1-dt*r)*V(j,n)                ...
+           + 0.5*dt*r*S(j).*(V(jp,n)-V(jm,n))/dS ...
+           + 0.5*dt*sig^2*S(j).^2.*(V(jp,n)-2*V(j,n)+V(jm,n))/dS^2; 
+  V(j,n-1) = max(V0(j),V(j,n-1));
+
+  Sb(n-1) = max(find(V(:,n-1) < X-S+1e-10)) * dS;
+end
+
+%
+% plot results
+%
+
+N1 = 1;
+N2 = 1+(N-1)/4;
+N3 = 1+(N-1)/2;
+N4 = 1+3*(N-1)/4;
+N5 = N;
+
+%figure
+%plot(S,V(:,N1), S,V(:,N2), S,V(:,N3), S,V(:,N4), S,V(:,N5))
+%axis([0.8 1.2 0 0.2])
+%title('American put option')
+
+%figure
+%plot(t,Sb,t,Sb-dS)
+%xlabel('t'); ylabel('S_b')
+%axis([0 1 0.8 1])
+%title('American put option')
+
+fprintf(' explicit finite difference method \n');
+fprintf(' option value at S0=1 is %f \n',V(1+(J-1)/2,1));
+
+\end{minted}
+\caption{The provided matlab code for finite difference evaluation of an American put option.}
+\label{code:amerfd}
+\end{code}
+\begin{table}
+\begin{center}
+\begin{tabular}{|c|c|c|}
+\hline
+$n_\mathrm{gridpoints}$&$n_\mathrm{timestep}$&$V(S_0=1, t=0)$\\
+\hline
+$201$&$4001$&$0.060879$\\
+$401$&$16001$&$0.060897$\\
+\hline
+\end{tabular}
+\caption{Results of amer\_fd.m.}
+\label{tab:amerfd:results}
+\end{center}
+\end{table}
+Running Listing~\ref{code:amerfd} results in the option values in Table~\ref{tab:amerfd:results}. 
+
+\section*{Section 1.2}
+
+\section*{Section 1.2.1}
+First, we implement the MC code in Python, using separate sets of paths for the continuation values and for the final price evaluation.
+\begin{code}
+<<wrap=True, fig=False>>=
+import logging
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+
+class AmericanOption(object):
+    def __init__(self, S0=1.0
+                    , K=1.0
+                    , r=0.05
+                    , sigma=0.2
+                    , T=1.0
+                    , payoff=None
+                    , n_timestep=64
+                    , n_path=1.0e5
+                    , seed = None
+                    , use_in_the_money=False
+                    , use_independent_paths=False
+                    , debug_level=logging.INFO
+                    , order=3):
+        """
+
+        :param S0: value of the underlying today
+        :type S0: float
+        :param K: strike
+        :type K: float
+        :param r: interest rate
+        :type r: float
+        :param sigma: variance
+        :type sigma: float
+        :param T: expiry
+        :type T: float
+        :param payoff: provide your own payoff function, default
+                       max(K-S,0)
+        :type payoff: function
+        :param n_timestep: number of timesteps
+        :type n_timestep: integer
+        :param n_path: number of paths
+        :type n_path: integer
+        :param seed: random seed.
+        :type seed: integer
+        :param use_in_the_money: use in-the-money paths only?
+        :type use_in_the_money: boolean
+        :param use_independent_paths: use independent paths for
+                                      the computation of the
+                                      continuation value and
+                                      for computing the value of
+                                      the option
+        :param debug_level: debug level
+        :type debug_level: one of logging.DEBUG, logging.INFO,
+                           logging.WARN, logging.CRITICAL
+        :param order: order of the expansion of the continuation value
+        :type order: integer
+
+        :return: None
+        :rtype: NoneType
+        """
+        self.S0 = S0
+        self.K = K
+        self.r = r
+        self.sigma = sigma
+        self.T = T
+        logging.basicConfig(
+            format='%(asctime)s: %(levelname)s: %(message)s'
+            , level=debug_level)
+        logging.debug('begin setup')
+        self.n_timestep = n_timestep
+        self.n_path = n_path
+        self.use_in_the_money = use_in_the_money
+        self.order = order
+        self.dt = self.T/(1.0 * (self.n_timestep))
+        self.discount_factor = np.exp(-self.r*self.dt)
+        self.use_independent_paths = use_independent_paths
+        if seed is not None:
+            np.random.seed(seed)
+        #end if
+
+        if payoff is None:
+            self.__payoff = self.__default_payoff
+        else:
+            self.__payoff = payoff
+        #end if
+    #end def __init__
+
+    def __call__(self):
+        """
+        :return: see the description of method __evolve__()
+        """
+
+        if self.use_independent_paths:
+            logging.debug('begin computation using independent paths')
+            logging.debug('getting betas')
+            beta_list = self.__evolve()['beta']
+            logging.debug('begin evaluation')
+            result = self.__evolve(beta_list)
+            logging.debug('end computation using independent paths')
+        else:
+            logging.debug('begin computation')
+            result = self.__evolve()
+            logging.debug('end computation')
+        return result
+
+    #end def __call__
+
+    def __get_path_list(self):
+        """
+        get the random paths for the MC evolution
+        :return: paths for the MC evolution
+        :rtype: np.ndarray(self.n_timestep, self.n_paths)
+        """
+        result = self.S0 * self.__get_random_path()
+        return result
+    #end def __get_path_list
+
+    def __get_mini_path_endpoint_list(self, s0, n_path):
+        """
+        gets the endpoints of the n_path mini paths, starting from s0
+        :param s0: starting point
+        :type s0: float
+        :param n_path: number of mini paths
+        :type n_path: integer
+        :return: list of endpoints of the minipaths
+        :rtype: [float]
+        """
+        path_list = self.__get_random_path(n_path=n_path*s0.size
+                                           , n_timestep=2)
+        result = (np.outer(s0, np.ones(n_path))
+                  * path_list[1, :].reshape(s0.shape + (n_path,)))
+        return result
+    #end def __get_mini_path_endpoint_list
+
+    def __get_random_path(self, n_path=None, n_timestep=None):
+        """
+        gets random paths. Can be used for computation of regular paths
+        and mini paths.
+        :param n_path: number of paths
+        :type n_path: integer
+        :param n_timestep: number of timesteps
+        :type n_timestep: integer
+        :return: gets n_path random paths of length n_timestep
+        :rtype: np.ndarray([n_time_step, n_path])
+        """
+        if n_path is None:
+            n_path = self.n_path
+        if n_timestep is None:
+            n_timestep = self.n_timestep
+
+        dw = math.sqrt(self.dt) * np.random.randn(n_path, n_timestep-1)
+        ds_list = (self.r - 0.5 * self.sigma**2)*self.dt + self.sigma * dw
+
+        s_list = np.exp(np.cumsum(ds_list, axis=1).transpose())
+        result = np.concatenate((np.ones((1, n_path)), s_list))
+
+        return result
+    #end def get_random_path
+
+    def __evolve(self, beta_list=None):
+        """
+        runs the MC evolution.
+
+        If beta_list is None, compute continuation value. That is, return
+        the coefficients of the expansion of the continuation value.
+
+        If beta_list is not None, use the provided betas as coefficients
+        for the expansion of the continuation value and compute the value
+        of the option.
+
+        :param beta_list: coefficients of the expansion of the continuation
+                          value
+        :type beta_list: np.ndarray([self.n_timestep, self.order]) or None
+        :return: dictionary, containing
+                'x': the sample paths in format x[t, path_number]
+                'v': the value of the option along each sample path in
+                     format v[t, path_number]
+                'h': the payoff along each path
+                     h[t, path_number] = max(K - x[t, path_number], 0)
+                'beta': the coefficients of the expansion of the
+                        continuation value. If the parameter beta
+                        is not None, returns the values of beta
+                'c': the continuation value in format c[t, path_number]
+                'npv': the present value of the option as the mean of
+                       v[0, path_number] over all paths
+                'stddev': stddev of v[t, path_number] over all paths
+        :rtype: dictionary
+        """
+        compute_beta = beta_list is None
+        x = self.__get_path_list()
+
+        v = np.zeros_like(x)
+        c = np.zeros_like(x)
+
+        if compute_beta:
+            beta_list = np.zeros([self.n_timestep, self.order])
+            logmessage = 'Computing betas, timestep'
+        else:
+            logmessage = 'Computing lower bound, timestep'
+        #end if
+
+        h = self.__payoff(x)
+        v[-1, :] = h[-1, :]
+        for t in xrange(self.n_timestep-2, 0, -1):
+            logging.info('%s %s' % (logmessage, t))
+
+            v[t, :] = self.discount_factor * v[t+1, :]
+
+            if compute_beta:
+                if self.use_in_the_money:
+                    ind_in_the_money = h[t, :] > 0.0
+                else:
+                    ind_in_the_money = slice(0, None)
+                #end if
+
+                beta_list[t, :] = np.polyfit(x[t, ind_in_the_money]
+                                             , v[t, ind_in_the_money]
+                                             , self.order-1)
+            #end if
+            c[t, :] = np.polyval(beta_list[t, :], x[t, :])
+
+            ind = h[t, :] > np.maximum(c[t, :], 0.0)
+            if any(ind):
+                v[t, ind] = h[t, ind]
+            #end if
+
+        #end for
+
+        # no exercise right at the start of the option, thus just discount
+        v[0, :] = self.discount_factor * v[1, :]
+
+        npv = np.mean(v[0, :])
+        stddev = np.std(v[0, :])/np.sqrt(len(v[0, :]))
+        result = {'npv': npv
+                , 'stddev': stddev
+                , 'beta': beta_list
+                , 'v': v
+                , 'h': h
+                , 'c': c
+                , 'x': x}
+        return result
+    #end def __evolve
+
+    def get_upper_bound(self, x, v, h, c, beta_list, n_minipath=100):
+        """
+        compute the Rogers upper bound of the option value. Must be called
+        using the return values of __call__(), i.e. after having called
+        __call__()
+
+        :param x: list of paths used for the computation of the lower
+                  bound in format x[t, path_number]
+        :type x: np.ndarray([self.n_timestep, self.n_paths])
+        :param v: the value of the option along each sample path in format
+                  v[t, path_number]
+        :type v: np.ndarray([self.n_timestep, self.n_paths])
+        :param h: the payoff along each path
+                  h[t, path_number] = max(K - x[t, path_number], 0)
+        :type h: np.ndarray([self.n_timestep, self.n_paths])
+        :param c: the continuation value in format c[t, path_number]
+        :type c: np.ndarray([self.n_timestep, self.n_paths])
+        :param beta_list: the coefficients of the expansion of the
+                          continuation value. If the parameter beta is not
+                          None, returns the values of beta_list
+        :type beta_list: np.ndarray([self.n_timestep, self.order])
+        :type c: np.ndarray([self.n_timestep, self.n_paths])
+        :param n_minipath: the number of mini paths
+        :type n_minipath: integer
+        :return: dictionary containing
+                'upper_bound': the upper bound
+                'stddev':  sttdev of the upper bound estimate
+                'upper_bound_per_path': the collection of self.n_paths
+                                        upper bounds
+        :rtype: dictionary
+        """
+        m_part = np.zeros([self.n_timestep, self.n_path])
+
+        for t in xrange(1, self.n_timestep):
+            logging.info('Computing upper bound, timestep %s' % t)
+
+            mini_path_endpoint_list = self.__get_mini_path_endpoint_list(
+                                        s0=x[t - 1, :]
+                                        , n_path=n_minipath)
+            mini_h = self.__payoff(mini_path_endpoint_list)
+            mini_c = np.polyval(beta_list[t, :], mini_path_endpoint_list)
+            mini_v = np.maximum(mini_h, mini_c)
+            mini_expectation_value = np.mean(mini_v, axis=1)
+            m_part[t, :] = (np.maximum(h[t, :], c[t, :])
+                            - mini_expectation_value)
+        #end for
+        m = np.cumsum(m_part, axis=0)
+
+        upper_bound_per_path = np.max(h - m, axis=0)
+
+        result = {'upper_bound': np.mean(upper_bound_per_path)
+                    , 'stddev': np.std(upper_bound_per_path)
+                    , 'upper_bound_per_path':  upper_bound_per_path}
+        return result
+    #end def get_upper_bound
+
+    def __default_payoff(self, s):
+        """
+        get the default payoff for a put option
+        :param s: value of the underlying
+        :type s: float
+        :return: payoff for a put option with underlying value s
+        :rtype: float
+        """
+        return np.maximum(self.K-s, 0.0)
+    #end def __payoff
+
+#end class AmericanOption
+@
+\caption{Computing the value of an American put option using the Longstaff-Schwartz \cite{LongstaffSchwartz} method. This also implements: using only in-the-money paths for computing the continuation value, using independent paths for computing the continuation value, and the value of the option. This code is called for the different parts of Section 1.2 and 1.3 using the functions defined in Listing~\ref{code:call}.}
+\label{code:ls}
+\end{code}
+The various parts of this and the following section are executed using the following commands.
+\begin{code}
+<<wrap=True, fig=False>>=
+def print_table_row(message, option, npv, stddev):
+    """
+    output the results of the calls to section*() in a format that can
+    be copied directly into LaTeX tables
+
+    :param message: description of the run
+    :type message: string
+    :param option: to fill the
+    :type option: AmericanOption
+    :param npv: value for column 'value'
+    :type npw: float
+    :param stddev: value for column 'stddev'
+    :type stddev: float
+    :return: None
+    """
+    print('%s&$%d$&$%2.1e$&%s&%s&$%g$&$%g$\\\\' % (message
+                            , option.n_timestep
+                            , option.n_path
+                            , option.use_independent_paths
+                            , option.use_in_the_money
+                            , npv
+                            , stddev))
+#end def print_table_row
+
+
+def section1_2_0():
+    option = AmericanOption(use_independent_paths=False
+                            , use_in_the_money=False
+                            , n_path=1.e5
+                            , debug_level=logging.WARNING
+                            , seed=1)
+    result = option()
+
+    logging.info("Using all paths, the value of a single run is %(npv)g, stddev: %(stddev)g" % result)
+    print_table_row('Section 1.2: single run for the unmodified original code', option, result['npv'], result['stddev'])
+    return result
+#end def section1_2_0
+
+
+def section1_2_1():
+    option = AmericanOption(use_independent_paths=True
+                            , use_in_the_money=False
+                            , n_path=1.e5
+                            , debug_level=logging.WARNING
+                            , seed=1)
+    result = option()
+    logging.info("Using all paths, the value of a single run is %(npv)g, stddev: %(stddev)g" % result)
+    print_table_row('Section 1.2.1: single run', option, result['npv']
+                    , result['stddev'])
+    return result
+#end def section1_2_1
+
+
+def section1_2_2(n_runs=100):
+    option = AmericanOption(use_independent_paths=True
+                                , use_in_the_money=False
+                                , n_path=1.e5
+                                , debug_level=logging.WARNING
+                                , seed=1)
+    result_list = [option()['npv'] for _ in xrange(n_runs)]
+    avg = np.mean(result_list)
+    stddev = np.std(result_list)
+    logging.info('Using all paths, the average value of %s runs is %s with a stddev of %s'
+          %(n_runs, avg, stddev))
+    print_table_row('Section 1.2.2: average value of %s runs' % n_runs
+                    , option, avg, stddev)
+    return result_list
+#end def section1_2_2
+
+
+def section1_2_3(n_runs=100):
+    option = AmericanOption(use_independent_paths=True
+                                , use_in_the_money=True
+                                , n_path=1.e5
+                                , debug_level=logging.WARNING
+                                , seed=1)
+    result_list = [option()['npv'] for _ in xrange(n_runs)]
+    avg = np.mean(result_list)
+    stddev = np.std(result_list)
+    logging.info('Using in-the-money paths only, the average value of %s runs is %s with a stddev of %s'
+          % (n_runs, avg, stddev))
+    print_table_row('Section 1.2.3: average value of %s runs' % n_runs
+                    , option, avg, stddev)
+    return result_list
+#end def section1_2_3
+
+
+def section1_3():
+    option = AmericanOption(use_independent_paths=True
+                            , use_in_the_money=False
+                            , n_path=1000
+                            , debug_level=logging.WARNING
+                            , seed=1)
+    result = option()
+
+    x = result['x']
+    c = result['c']
+    h = result['h']
+    v = result['v']
+    beta_list = result['beta']
+
+    result = option.get_upper_bound(x, v, h, c, beta_list, n_minipath=100)
+    logging.info('Upper limit: %s, stddev: %s'
+                 % (result['upper_bound'], result['stddev']))
+    print_table_row('Section 1.3: upper bound using Roger\'s algorithm and 100 minipaths'
+                    , option, result['upper_bound'], result['stddev'])
+    return result
+#end def section1_3
+@
+\caption{Calling the Longstaff-Schwartz algorithm for Sections 1.2 and 1.3. The results are shown in Table~\ref{tab:results}.}
+\label{code:call}
+\end{code}
+\section*{Section 1.2.2}
+The results from running $100$ sets of $1.e5$ paths using separate paths for getting the continuation value and the option price are discussed in Section Discussion.
+\section*{Section 1.2.3}
+Performing the regression using only in-the-money paths leads to a reduction of the runtime. For profiling, we run 10 independent runs with $1.e5$ runs using all paths and only in-the-money paths for the regression. This results in a $\approx 10\%$ reduction in run time, see Table~\ref{tab:runtime_regression}. Performing the $100$ runs of in-the-money paths and the discussion of the results are done in Section Discussion.
+\begin{sidewaystable}
+\begin{center}
+\begin{tabular}{|m{5cm}|m{12cm}|c|}
+\hline
+Description & Command & Time (s)\\
+\hline
+using all paths, 10 runs &
+\begin{minipage}{12cm}
+\begin{verbatim}
+import cProfile
+import pstats
+cProfile.run('section1_2_2(10)', 'section1_2_2.prof')
+pstats.stat('section1_2_2.prof').print_stats('section1_2_2')
+\end{verbatim}
+\end{minipage}
+&$36.56$\\
+\hline
+using only in the money paths for the regression &
+\begin{minipage}{12cm}
+\begin{verbatim}
+import cProfile
+import pstats
+cProfile.run('section1_2_3(10)', 'section1_2_3.prof')
+pstats.stat('section1_2_3.prof').print_stats('section1_2_3')
+\end{verbatim}
+\end{minipage}
+&$32.67$\\
+\hline
+\end{tabular}
+\caption{Run time comparison when performing the regression using all paths or only in-the-money paths. The latter is $\approx 10\%$ faster. See the appendix for system details.}
+\label{tab:runtime_regression}
+\end{center}
+\end{sidewaystable}
+\begin{sidewaystable}
+    \begin{center}
+        \begin{tabular}{|c|c|m{5cm} |m{2cm}|m{2cm}|m{2cm}|m{1.5cm}|m{1.7cm}|m{1.7cm}|}
+            \hline
+            Number & Code & Description & $n_\mathrm{timestep}$ & $n_\mathrm{paths}$ & independent paths &  in-the-money paths & value & stddev\\
+            \hline
+            1 & {\tt amer\_fd.m} & Section 1.1: using the finite difference code amer\_fd.m&$4000$& N/A & N/A & N/A & $0.060879$& N/A\\
+            \hline
+            2 & {\tt amer\_fd.m} & Section 1.1: using the finite difference code amer\_fd.m with a higher resolution &$16000$& N/A & N/A & N/A & $0.060897$& N/A\\
+            \hline
+            3 & {\tt section1\_2\_0()}& <%result1_2_0 = section1_2_0()%>
+            \hline
+            4 & {\tt section1\_2\_1()} & <%result1_2_1 = section1_2_1()%>
+            \hline
+            5 & {\tt section1\_2\_2()} & <%result1_2_2 = section1_2_2()%>
+            \hline
+            6 & {\tt section1\_2\_3()} & <%result1_2_3 = section1_2_3()%>
+            \hline
+            7 & {\tt section1\_3()} & <%result1_3 = section1_3()%>
+            \hline
+        \end{tabular}
+    \end{center}
+    \caption{Results for Section 1.1 to 1.3.}
+    \label{tab:results}
+\end{sidewaystable}
+\section*{Modification of the MC code due to negative continuation values}
+Note that we modified the algorithm slightly as the interpolation of the continuation value could lead to negative values, see Figure~\ref{fig:neg_cont_value}, which is created using the code in Listing~\ref{code:neg_cont_value}. There are instances where the continuation value is negative. Using the condition that the current value of the option is larger than the continuation value is not a sufficient condition. Additionally, the current value better be positive. Thus, to not have options "exercised" for paths at time steps where the option value is out-of-the money and still above the continuation value, we modify line 220 in Listing~\ref{code:ls} to use {\tt max(continuation value, 0.0)}.
+\begin{code}
+<<fig=False>>=
+def plot(x, c, v):
+    n_timestep = len(x)
+    dim = int(np.ceil(np.sqrt(n_timestep)))
+    fig, axs = plt.subplots(dim
+                            , dim
+                            , sharex=True
+                            , sharey=True
+                            , figsize=(11,8))
+    fig.subplots_adjust(wspace=0, hspace=0)
+    plt.hold(True)
+    for t in xrange(n_timestep):
+        ax = axs[t/dim, t % dim]
+        line_v, = ax.plot(x[t, :], v[t, :], 'g.', label=r'$V$')
+        x_t = x[t, :]
+        c_t = c[t, :]
+        line_c, = ax.plot(x_t, c_t, 'b.', label=r'$\hat{C}$', linewidth=2)
+        x_t_neg, c_t_neg = x_t[c_t<0.0], c_t[c_t<0.0]
+        line_c_neg, = ax.plot(x_t_neg, c_t_neg, 'r.', label=r'$\hat{C}<0$'
+                              , linewidth=2)
+        ax.set_xlim([0, 1.9])
+        ax.set_ylim([-0.04, 0.34])
+        ax.text(0.5, 0.8, '%s' % (n_timestep-t-1)
+                , horizontalalignment='center'
+                , transform=ax.transAxes)
+        if t % dim == 0:
+            ax.set_ylabel(r'$C_{\tau}, V_{\tau}$')
+        if (t > 55):
+            ax.set_xlabel(r'$S_{\tau}$')
+    #end for
+
+    fig.legend([line_v, line_c, line_c_neg,]
+                , [r'$V$', r'$\hat{C}$', r'$\hat{C}<0$']
+                , bbox_to_anchor=(0.5, 1)
+                , loc='upper center'
+                , ncol=3
+                , columnspacing=3
+                #, borderaxespad=0.
+               )
+
+    plt.show()
+#end def plot
+@
+\caption{Code to plot the each path's function value and the continuation value for each time step.}
+\label{code:neg_cont_value}
+\end{code}
+\begin{figure}
+\begin{center}
+<<figNegContValue, include=False>>=
+plot(result1_2_0['x'], result1_2_0['c'], result1_2_0['v'])
+@
+\includegraphics[width= \linewidth]{"figures/M6_15_1000246_Section_1_figNegContValue_1png"}
+\caption{Implementing the Longstaff-Schwarz algorithm as in the lectures (or the Matlab code) leads to negative continuation values (red dots). Blue dots are positive continuation values. Green dots are the values of the American put for each simulated path. Hence, we take special care to use {\tt max(continuation value, 0.0)} in line 220 of Listing~\ref{code:ls}. The number in the upper right corner of each plot denotes the timestep $\tau$ with $\tau=T=63$ being the value today.}
+\label{fig:neg_cont_value}
+\end{center}
+\end{figure}
+\section*{Section 1.3}
+To compute the upper limit, we implemented Roger's algorithm in method {\tt AmericanOption.get\_upper\_bound()}. See Table~\ref{tab:results} for the results.
+\section*{Discussion}
+As expected, the value of the American put option is biased low when using the Longstaff-Schwartz method compared to the value obtained by using finite differences, see rows 1, 2, and 3 in Table~\ref{tab:results}. Using independent paths for computing the continuation value and the option value gives a less biased value, see row 4. In order to get sufficient statistics we next average over $100$ runs, yielding a somewhat less biased estimate, see row 5. When using only in-the-money paths, the resulting value of the American put is even less biased, see row 6. This is due to the fact that the continuation value is better approximated when ignoring out-of-the-money paths. 
+
+As mentioned in the lectures, using Roger's algorithm to compute an upper bound results in a somewhat poor upper bound, see row 7. 
+
+It is instructive to take a look at the histograms of various runs. 
+
+Figure~\ref{fig:histograms:LS} shows the difference between including (solid blue line) and excluding (dashed red line) out-of-the-money paths when computing the continuation value, using the $100$ values each from Section 1.2.2 and 1.2.3: the latter makes the estimate of the American put option's value less biased.
+
+\begin{figure}[H]
+<<figHistLS, include=False>>=
+plt.gcf()
+plt.hold(True)
+_ = plt.hist(result1_2_2
+         , facecolor='None'
+         , edgecolor='b'
+         , lw=3
+         , label='Using all paths')
+_ = plt.hist(result1_2_3
+         , facecolor='None'
+         , edgecolor='r'
+         , lw=3
+         , ls='dashed'
+         , label='Using only in-the-money paths')
+plt.xlabel('Value of the American put option')
+plt.ylabel('Number')
+plt.legend()
+plt.hold(False)
+plt.show()
+@
+\includegraphics[width= \linewidth]{"figures/M6_15_1000246_Section_1_figHistLS_1png"}
+\caption{Histograms of the distribution of the value of the American put option for the implementation of the Longstaff-Schwartz algorithm using all paths (blue solid line) and only in-the-money paths (dashed red line) when computing the continuation value from the $100$ runs each from Section 1.2.2 and 1.2.3. Using only in-the-money paths for computing the continuation value gives a less biased value for the option price: the histogram for this case is shifted to the right compared to using all paths.}
+\label{fig:histograms:LS}
+\end{figure}
+
+\appendix
+\section*{Appendix: Extracting and Running the Code}
+Note that all runs have a fixed seed for reproducibility. Modify if needed.
+This document uses literate programming \cite{pweave}. The code can be extracted using
+\begin{code}
+\begin{minted}{bash}
+ptangle "M15 1000246 Section 1.pnw"
+\end{minted}
+\caption{Extracting the code from the noweb document.}
+\label{code:extraction}
+\end{code}
+Creating this document from source (including dynamic creation of figures) is done via
+\begin{code}
+\begin{minted}{python}
+import pweave
+pweave.weave(r'M6_15_1000246_Section_1.pnw'
+            , figformat='png'
+            , doctype='texminted'
+            , cache=True)
+\end{minted}
+followed by the shell command
+\begin{minted}{bash}
+pdflatex -shell-escape "M6_15_1000246_Section_1.tex"
+\end{minted}
+\caption{Recreating this document.}
+\label{code:recreate}
+\end{code}
+This document was created using the following versions on an Intel Core i7 U5600 @2.6GHz with 8GB of RAM.
+\begin{code}
+<<fig=False>>=
+import matplotlib as mp
+import sys
+print('Python version: %s' % sys.version)
+print('NumPy version: %s ' % np.__version__)
+print('Matplotlib version: %s ' % mp.__version__)
+@
+\caption{Versions used for this document.}
+\label{code:versions}
+\end{code}
+\begin{thebibliography}{99}
+\bibitem{pweave} Matti Pastelli, Pweave - Scientific Reports Using Python, {\tt http://mpastell.com/pweave/}
+\bibitem{LongstaffSchwartz} F.A. Longstaff and E.S. Schwartz, Valuing {A}merican options by simulation: A simple least-squares approach, \emph{Review of Financial Studies}, 14\penalty0 (1):\penalty0 113--47, 2001.
+\end{thebibliography}
+\end{document}
